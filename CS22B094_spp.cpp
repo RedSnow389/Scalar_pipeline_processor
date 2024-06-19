@@ -1,504 +1,814 @@
-
-#include <bits/stdc++.h>
+#include <iostream>
 #include <fstream>
+#include <vector>
+#include <map>
+
 using namespace std;
 
-string s, t;
-ifstream input_file;
-ifstream register_file;
-ifstream data_in_file;
-ofstream data_out_file;
-ofstream output_file;
+/* Register Renaming start */
 
-int registers[16];
-int register_dependent[16];
-bool done[5];
-bool final_done = false;
+int PC = 0;
+int maxRRFe = 32, maxfetch = 4;
+map<int, int> RRFtoARF;
+int ICache[256], DCache[256], RF[16];
+int num_stall = 0, num_dat_st = 0, num_con_st = 0, num_inst = 0, num_cycles = 0; // Statistics
+int num_arith = 0, num_log = 0, num_con = 0, num_data = 0, num_halt = 0;         // Statistics
+bool halt = 0, can_fetch = 1;                                                  // Halt and Fetch Flags
 
-int memory_address_load = -1;
-int memory_address_store = -1;
-int memory_decoded_dest = -1;
-int total_instructions = 0;
-int li_instructions = 0;
-int logical_instructions = 0;
-int shift_instructions = 0;
-int arithmetic_instructions = 0;
-int memory_instructions = 0;
-int control_instructions = 0;
-int halt_instructions = 0;
-int total_cycles = -1;
-int data_stalls = 0;
-int control_stalls = 0;
-
-int pc_val = 0;
-int newpc_val = -1;
-char opcode = '$';
-int evaluated_value = -1;
-int temp_register_a = 1000;
-int temp_register_b = 1000;
-int write_decoded_destination = -1;
-int decoded_destination = -1;
-bool is_branching = false;
-bool execute_branching = false;
-bool branching_done = false;
-
-string has_been_decoded = "";
-vector<string> instructions;
-vector<string> data_cache;
-
-pair<int, int> need_to_write = make_pair(-1, -1);
-
-int hex_to_num(char c)
-{ // credit: gfg
-    int retval = c;
-    if (retval >= 65)
-        retval -= 87;
-    else
-        retval -= 48;
-    return retval;
-}
-
-string num_to_hex(int n)
-{ // credit: gfg
-    if (n < 0)
-        n += 256;
-    int a = n % 16;
-    if (a > 9)
-        a += 87;
-    else
-        a += 48;
-    int b = n / 16;
-    if (b > 9)
-        b += 87;
-    else
-        b += 48;
-    string s1 = "";
-    s1 = s1 + (char)b;
-    s1 = s1 + (char)a;
-    return s1;
-}
-
-int signed_hex_to_num(char c)
-{ // credit: gfg
-    int retval = hex_to_num(c);
-    if (retval > 7)
-        retval -= 16;
-    return retval;
-}
-
-void write_back()
+void hex_to_dec(int &x)             // Converts HEX to DEC
 {
-    if (need_to_write.first != -1)
-    {
-        register_dependent[need_to_write.first]--;
-        registers[need_to_write.first] = need_to_write.second;
-    }
-    if (done[4])
-        final_done = true;
-    need_to_write = make_pair(-1, -1);
+    if (x & (1 << 7))
+        x = x - (1 << 8);
 }
 
-void memory_operation()
+void dec_to_hex(int &x)             // Converts DEC to HEX
 {
-    if (done[3])
-        done[4] = true;
-    if (memory_address_load != -1)
-        registers[memory_decoded_dest] = signed_hex_to_num(data_cache[memory_address_load][0]) * 16 + hex_to_num(data_cache[memory_address_load][1]);
-    else if (memory_address_store != -1)
-        data_cache[memory_address_store] = num_to_hex(registers[memory_decoded_dest]);
-    else if (write_decoded_destination != -1)
-        need_to_write = make_pair(write_decoded_destination, evaluated_value);
-    else if (execute_branching)
-    {
-        branching_done = true;
-        newpc_val = evaluated_value;
-    }
-    evaluated_value = -1;
-    memory_decoded_dest = -1;
-    memory_address_load = -1;
-    memory_address_store = -1;
-    write_decoded_destination = -1;
+    if (x < 0)
+        x = x + (1 << 8);
 }
 
-void execute_stage()
+class ARFe
 {
-    if (done[2])
-        done[3] = true;
-    if (is_branching)
-        execute_branching = true;
-    if (temp_register_a == -1)
-        return;
+    public:
+        ARFe()
+        {
+            busy = false;
+        }
+        int index;
+        int data;
+        bool busy;
+        int tag;
+        int destination_allocate();
+        pair<bool, int> source_read();
+};
 
-    switch (opcode)
-    {
-    case 'l':
-    case 's':
-    case '+':
-        evaluated_value = temp_register_a + temp_register_b;
-        break;
-    case '-':
-        evaluated_value = temp_register_a - temp_register_b;
-        break;
-    case '*':
-        evaluated_value = temp_register_a * temp_register_b;
-        break;
-    case '^':
-        evaluated_value = temp_register_a ^ temp_register_b;
-        break;
-    case '&':
-        evaluated_value = temp_register_a & temp_register_b;
-        break;
-    case '|':
-        evaluated_value = temp_register_a | temp_register_b;
-        break;
-    case '~':
-        evaluated_value = ~temp_register_a;
-        break;
-    case '<':
-        evaluated_value = temp_register_a << temp_register_b;
-        break;
-    case '>':
-        evaluated_value = temp_register_a >> temp_register_b;
-        break;
-    case 'i':
-        evaluated_value = temp_register_a;
-        break;
-    case 'j':
-        evaluated_value = pc_val + temp_register_a;
-        break;
-    case 'b':
-        if (temp_register_a == 0)
-            evaluated_value = pc_val + temp_register_b;
-        else
-            evaluated_value = pc_val;
-        break;
-
-    default:
-        evaluated_value = -1;
-        break;
-    }
-    if (opcode != 'l' && opcode != 's' && opcode != 'j' && opcode != 'b')
-    {
-        write_decoded_destination = decoded_destination;
-    }
-    else if (opcode == 's')
-    {
-        memory_address_store = evaluated_value;
-        memory_decoded_dest = decoded_destination;
-    }
-    else if (opcode == 'l')
-    {
-        memory_address_load = evaluated_value;
-        memory_decoded_dest = decoded_destination;
-    }
-
-    temp_register_a = 1000;
-    temp_register_b = 1000;
-    decoded_destination = -1;
-}
-
-void instruction_decode()
+class RRFe
 {
-    if (done[1])
-        done[2] = true;
-    if (has_been_decoded == "")
-        return;
-    total_instructions++;
-    switch (has_been_decoded[0])
-    {
-    case '0':
-        opcode = '+';
-        arithmetic_instructions++;
-        break;
-    case '1':
-        opcode = '-';
-        arithmetic_instructions++;
-        break;
-    case '2':
-        opcode = '*';
-        arithmetic_instructions++;
-        break;
-    case '3':
-        opcode = '+';
-        arithmetic_instructions++;
-        break;
-    case '4':
-        opcode = '&';
-        logical_instructions++;
-        break;
-    case '5':
-        opcode = '|';
-        logical_instructions++;
-        break;
-    case '6':
-        opcode = '^';
-        logical_instructions++;
-        break;
-    case '7':
-        opcode = '~';
-        logical_instructions++;
-        break;
-    case '8':
-        opcode = '<';
-        shift_instructions++;
-        break;
-    case '9':
-        opcode = '>';
-        shift_instructions++;
-        break;
-    case 'a':
-        opcode = 'i';
-        li_instructions++;
-        break;
-    case 'b':
-        opcode = 'l';
-        memory_instructions++;
-        break;
-    case 'c':
-        opcode = 's';
-        memory_instructions++;
-        break;
-    case 'd':
-        opcode = 'j';
-        control_instructions++;
-        break;
-    case 'e':
-        opcode = 'b';
-        control_instructions++;
-        break;
-    case 'f':
-        opcode = 'h';
-        halt_instructions++;
-        break;
+    public:
+        RRFe()
+        {
+            busy = 0;
+            valid = 0;
+        }
+        int tag;
+        int data;
+        bool valid;
+        bool busy;
+        void update(int result);
+        void regupd();
+};
 
-    default:
-        break;
-    }
+vector<ARFe> ARF(16);
+vector<RRFe> RRF(maxRRFe);
 
-    if (opcode != 'j' && opcode != 'b' && opcode != 'h')
-        decoded_destination = hex_to_num(has_been_decoded[1]);
-    if (opcode == '+' || opcode == '-' || opcode == '*' || opcode == '&' || opcode == '^' || opcode == '|' || opcode == '<' || opcode == '>')
-    {
-        if (has_been_decoded[0] == '3')
-        {
-            if (register_dependent[decoded_destination])
-            {
-                total_cycles++;
-                write_back();
-                memory_operation();
-                data_stalls++;
-            }
-            if (register_dependent[decoded_destination])
-            {
-                total_cycles++;
-                write_back();
-                data_stalls++;
-            }
-        }
-        else
-        {
-            if (register_dependent[hex_to_num(has_been_decoded[2])] || register_dependent[hex_to_num(has_been_decoded[3])])
-            {
-                total_cycles++;
-                write_back();
-                memory_operation();
-                data_stalls++;
-            }
-            if (register_dependent[hex_to_num(has_been_decoded[2])] || register_dependent[hex_to_num(has_been_decoded[3])])
-            {
-                total_cycles++;
-                write_back();
-                data_stalls++;
-            }
-        }
-
-        register_dependent[decoded_destination]++;
-        // by now dependancy must be cleared
-
-        if (has_been_decoded[0] == '3')
-        {
-            temp_register_a = registers[decoded_destination];
-            temp_register_b = 1;
-        }
-        else
-        {
-            temp_register_a = registers[hex_to_num(has_been_decoded[2])];
-            temp_register_b = registers[hex_to_num(has_been_decoded[3])];
-        }
-
-        has_been_decoded = "";
-    }
-    else if (opcode == '~' || opcode == 'l' || opcode == 's')
-    {
-        if (register_dependent[hex_to_num(has_been_decoded[2])])
-        {
-            total_cycles++;
-            data_stalls++;
-            write_back();
-            memory_operation();
-        }
-        if (register_dependent[hex_to_num(has_been_decoded[2])])
-        {
-            total_cycles++;
-            data_stalls++;
-            write_back();
-        }
-
-        register_dependent[decoded_destination]++;
-        if (opcode == '~')
-        {
-            temp_register_a = registers[hex_to_num(has_been_decoded[2])];
-            temp_register_b = -1;
-        }
-        else
-        {
-            temp_register_a = registers[hex_to_num(has_been_decoded[2])];
-            temp_register_b = signed_hex_to_num(has_been_decoded[3]);
-        }
-
-        has_been_decoded = "";
-    }
-    else if (opcode == 'i')
-    {
-        temp_register_a = signed_hex_to_num(has_been_decoded[2]) * 16 + hex_to_num(has_been_decoded[3]);
-        temp_register_b = -1;
-        has_been_decoded = "";
-        register_dependent[decoded_destination]++;
-    }
-    else if (opcode == 'h')
-    {
-        done[0] = true;
-        has_been_decoded = "";
-    }
-    else
-    {
-        is_branching = true;
-        if (opcode == 'j')
-        {
-            temp_register_a = signed_hex_to_num(has_been_decoded[1]) * 16 + hex_to_num(has_been_decoded[2]);
-            temp_register_b = -1;
-        }
-        else
-        {
-            if (register_dependent[hex_to_num(has_been_decoded[1])])
-            {
-                total_cycles++;
-                data_stalls++;
-                write_back();
-                memory_operation();
-            }
-            if (register_dependent[hex_to_num(has_been_decoded[1])])
-            {
-                data_stalls++;
-                total_cycles++;
-                write_back();
-            }
-            temp_register_a = registers[hex_to_num(has_been_decoded[1])];
-            temp_register_b = signed_hex_to_num(has_been_decoded[2]) * 16 + hex_to_num(has_been_decoded[3]);
-        }
-        has_been_decoded = "";
-    }
-}
-
-void instruction_fetch()
+int ARFe::destination_allocate()
 {
-    if (!is_branching && !done[0])
+    for(int ii = 0; ii < 32; ii++)
     {
-        pc_val++;
-        has_been_decoded = instructions[pc_val];
-    }
-    else if (done[0])
-        done[1] = true;
-    else if (branching_done)
-    {
-        pc_val = newpc_val + 1;
-        control_stalls += 2;
-        has_been_decoded = instructions[newpc_val];
-        is_branching = false;
-        execute_branching = false;
-        branching_done = false;
-        newpc_val = -1;
-    }
-    else
-        return;
-}
-
-int main()
-{
-
-    for (int i = 0; i < 16; i++)
-    {
-        registers[i] = 0;
-        register_dependent[i] = 0;
-        if (i < 5)
-            done[i] = 0;
-    }
-
-    string append_string;
-
-    input_file.open("ICache.txt");
-
-    while (!input_file.eof())
-    {
-        getline(input_file, s, '\n');
-        getline(input_file, t, '\n');
-        append_string = s + t;
-        instructions.push_back(append_string);
-    }
-
-    input_file.close();
-
-    register_file.open("RF.txt");
-
-    for (int i = 0; i < 16; i++)
-    {
-        getline(register_file, s, '\n');
-        registers[i] = stoi(s);
-    }
-
-    register_file.close();
-
-    while (!data_in_file.eof())
-    {
-        getline(data_in_file, s, '\n');
-        data_cache.push_back(s);
-    }
-
-    while (!final_done)
-    {
-        total_cycles++;
-        write_back();
-        if (final_done)
+        if(RRF[ii].busy == 0)
+        {
+            RRF[ii].busy = 1;
+            RRF[ii].valid = 0;
+            this->tag = RRF[ii].tag;
+            RRFtoARF[tag] = this->index;
+            this->busy = 1;
             break;
-        memory_operation();
-        execute_stage();
-        instruction_decode();
-        instruction_fetch();
+        }
+    }
+    return tag;
+}
+
+pair<bool, int> ARFe::source_read()
+{
+    pair<bool, int> answer;
+    if(busy == 0)
+    {
+        answer.first = true;
+        answer.second = data;
+    }
+    else {
+        if(RRF[tag].valid == 1)
+        {
+            answer.first = true;
+            answer.second = RRF[tag].data;
+        }
+        else
+        {
+            answer.first = false;
+            answer.second = tag;
+        }
+    }
+    return answer;
+}
+
+void RRFe::regupd() {
+    int in = RRFtoARF[tag];
+    ARF[in].data = data;
+    ARF[in].busy = 0;
+    busy = 0;
+}
+
+/* Register Renaming End */
+
+class Instruction
+{ // Instruction Class
+public:
+    int index;
+    int IR, args[4], NPC;                           // Instruction Register, Arguments, New Program Counter
+    int op;
+    int RA, RB, Imm, ALUOutput, Cond, destTag;      // Source Registers, ALU Output, Condition
+    int LMD;                                        // Load Memory Data
+    bool validA, validB;
+    bool finish, is_stalled = 0, decoded = 0;
+
+    int stage; // Stage of Instruction
+    
+    void get_args()
+    { // Get Arguments
+        int temp = IR;
+        for (int i = 3; i >= 0; i--)
+        {
+            args[i] = temp & 15;
+            temp = (temp >> 4);
+        }
     }
 
-    float cycle_per_instruction = (float)total_cycles / total_instructions;
-
-    output_file.open("Output.txt");
-
-    output_file << "Total number of instructions execute_staged: " << total_instructions << '\n';
-    output_file << "Number of instructions in each class\n";
-    output_file << "Arithmetic instructions: " << arithmetic_instructions << '\n';
-    output_file << "Logical instructions: " << logical_instructions << '\n';
-    output_file << "Shift instructions: " << shift_instructions << '\n';
-    output_file << "Memory instructions: " << memory_instructions << '\n';
-    output_file << "Load immediate instructions: " << li_instructions << '\n';
-    output_file << "Control instructions: " << control_instructions << '\n';
-    output_file << "Halt instructions: " << halt_instructions << '\n';
-    output_file << "Cycles per instruction: " << cycle_per_instruction << '\n';
-    output_file << "Total number of stalls: " << data_stalls + control_stalls << '\n';
-    output_file << "Data stalls (RAW): " << data_stalls << '\n';
-    output_file << "Control stalls: " << control_stalls << '\n';
-    output_file.close();
-    data_out_file.open("output/DCache.txt");
-    if (!data_out_file) cerr << "Cant open the file" << endl;
-    for(int i = 0; i < 256; i++){
-        data_out_file << data_cache[i] << '\n';
+    void fetch()
+    { // Fetch Stage
+        NPC = PC;
+        index = PC/2;
+        IR = (ICache[NPC] << 8) + ICache[NPC + 1];
+        NPC = NPC + 2;
+        PC = NPC;
+        stage = 1;
     }
-    data_out_file.close();
+
+    void decode()
+    { // Decode Stage
+        get_args();
+        op = args[0];
+        pair<bool, int> temp;
+        switch(op)
+        {
+            case 0: // ADD instruction
+            case 1: // SUB instruction
+            case 2: // MUL instruction
+            case 4: // AND instruction
+            case 5: // OR instruction
+            case 7: // XOR instruction
+                temp = ARF[args[2]].source_read();
+                validA = temp.first; RA = temp.second;
+                temp = ARF[args[3]].source_read();
+                validB = temp.first; RB= temp.second;
+                destTag = ARF[args[1]].destination_allocate();
+                break;
+            case 3: // INC instruction
+                temp = ARF[args[2]].source_read();
+                validA = temp.first; RA = temp.second;
+                validB = 1; RB = 1;
+                destTag = ARF[args[1]].destination_allocate();
+                break;
+            case 6: // NOT instruction
+                temp = ARF[args[2]].source_read();
+                validA = temp.first; RA = temp.second;
+                validB = 1; RB = 0xff;
+                destTag = ARF[args[1]].destination_allocate();
+                break;
+            case 8: // LOAD instruction
+                temp = ARF[args[2]].source_read();
+                validA = temp.first; RA = temp.second;
+                validB = 1;
+                Imm = args[3];
+                hex_to_dec(Imm);
+                destTag = ARF[args[1]].destination_allocate();
+                break;
+            case 9: // STORE instruction
+                temp = ARF[args[2]].source_read();
+                validA = temp.first; RA = temp.second;
+                temp = ARF[args[1]].source_read();
+                validB = temp.first; RB = temp.second;
+                Imm = args[3];
+                hex_to_dec(Imm);
+                break;
+            case 10: // JMP instruction
+                Imm = (args[1] << 4) + args[2];
+                validA = 1;
+                validB = 1;
+                hex_to_dec(Imm);
+                can_fetch = 0;
+                break;
+            case 11: // BEQZ instruction
+                temp = ARF[args[1]].source_read();
+                validA = temp.first; RA = temp.second;
+                Imm = (args[2] << 4) + args[3];
+                validB = 1;
+                hex_to_dec(Imm);
+                can_fetch = 0;
+                break;
+            case 15: // HLT instruction
+                halt = 1;
+                break;
+        }
+        decoded = 1;
+        stage++;
+        //DBuf.push_back(*this);
+    }
+};
+
+vector<Instruction> IBuf;
+vector<Instruction> DBuf;
+
+class ROBe
+{
+    public:
+        Instruction I;
+        bool issued, finished, busy, valid;
+        int IA;
+        ROBe()
+        {
+            issued = 0;
+            finished = 0;
+            busy = 0;
+        }
+};
+vector<ROBe> ROB;
+
+class RESe
+{
+    public:
+        Instruction I;
+        bool busy;
+        bool ready;
+        bool executed;
+        bool finished;
+        RESe()
+        {
+            finished = 0;
+            executed = 0;
+            busy = 0;
+        }
+};
+
+class FunctionalUnit
+{
+    public:
+        vector<RESe> resStation;
+        FunctionalUnit()
+        {
+            resStation.resize(2);
+        }
+        void finish()
+        {
+            for(int i = 0; i < 2; i++) {
+                if(resStation[i].executed)
+                {
+                    Instruction I = resStation[i].I;
+                    resStation[i].busy = 0;
+                    resStation[i].executed = 0;
+                    if(I.op < 8) 
+                        RRF[I.destTag].update(I.ALUOutput);
+                    else if(I.op == 8) {
+                        RRF[I.destTag].update(I.LMD);
+                    }
+                    resStation[i].finished = 1;
+                    for(vector<ROBe>::iterator itt = ROB.begin(); itt != ROB.end(); itt++) {
+                        if(itt->IA == I.index) {
+                            itt->I = I;
+                            itt->finished = 1;
+                        }
+                    }
+                }
+            }
+        }
+        void validate(int tag)
+        {
+            for(int i = 0; i < 2; i++) {
+                if(resStation[i].busy == 0) continue;
+                Instruction& I = resStation[i].I;
+                if(!I.validA)
+                {
+                    if(I.RA == tag){
+                        I.RA = RRF[I.RA].data;
+                        I.validA = 1;
+                    }
+                }
+                if(!I.validB)
+                {
+                    if(I.RB == tag){
+                        I.RB = RRF[I.RB].data;
+                        I.validB = 1;
+                    }
+                }
+            }
+        }
+        int size()
+        {
+            int cnt = 0;
+            for(int i = 0; i < 2; i++) {
+                RESe R = resStation[i];
+                if(R.busy) cnt++;
+            }
+            return cnt;
+        }
+};
+
+class Arithmetic : public FunctionalUnit
+{
+    public:
+        void process()
+        {
+            for(int i = 0; i < 2; i++) {
+                RESe& R = resStation[i];
+                if(!R.busy) continue;
+                Instruction& I = R.I;
+                //cout << I.RA << " " << I.RB << endl;
+                if(R.busy && I.validA && I.validB)
+                {
+                    R.ready = 1;
+                    ArithmeticFU(R);
+                    for(vector<ROBe>::iterator itt = ROB.begin(); itt != ROB.end(); itt++) {
+                        ROBe& RRR = *itt;
+                        if(RRR.IA == I.index) {
+                            RRR.issued = 1;
+                        }
+                    }
+                }
+            }
+        }
+        void ArithmeticFU(RESe& R) {
+            Instruction& I = R.I;
+            switch(I.op)
+            {
+                case 0:
+                case 3: I.ALUOutput = I.RA + I.RB; break;
+                case 1: I.ALUOutput = I.RA - I.RB; break;
+                case 2: I.ALUOutput = I.RA * I.RB; break;
+            }
+            //cout << I.ALUOutput << endl;
+            R.executed = 1;
+        }
+}A;
+
+class Logical : public FunctionalUnit
+{
+    public:
+        void process()
+        {
+            for(int i = 0; i < 2; i++) {
+                RESe& R = resStation[i];
+                if(!R.busy) continue;
+                Instruction& I = R.I;
+                if(R.busy && I.validA && I.validB)
+                {
+                    R.ready = 1;
+                    LogicalFU(R);
+                    for(vector<ROBe>::iterator itt = ROB.begin(); itt != ROB.end(); itt++) {
+                        ROBe& RRR = *itt;
+                        if(RRR.IA == I.index) {
+                            RRR.issued = 1;
+                        }
+                    }
+                }
+            }
+        }
+        void LogicalFU(RESe& R) {
+            Instruction& I = R.I;
+            switch(I.op)
+            {
+                case 4: I.ALUOutput = I.RA & I.RB; break;
+                case 5: I.ALUOutput = I.RA | I.RB; break;
+                case 6: I.ALUOutput = ~ I.RA; break;
+                case 7: I.ALUOutput = I.RA ^ I.RB; break;
+            }
+            //cout << I.ALUOutput << endl;
+            R.executed = 1;
+        }
+}L;
+
+class Memory : public FunctionalUnit
+{
+    public:
+        void process()
+        {
+            for(int i = 0; i < 2; i++) {
+                RESe& R = resStation[i];
+                if(!R.busy) continue;
+                Instruction& I = R.I;
+                if(R.busy && I.validA && I.validB)
+                {
+                    R.ready = 1;
+                    MemoryFU(R);
+                    //R.busy = 0;
+                    for(vector<ROBe>::iterator itt = ROB.begin(); itt != ROB.end(); itt++) {
+                        ROBe& RRR = *itt;
+                        if(RRR.IA == I.index) {
+                            RRR.issued = 1;
+                        }
+                    }
+                }
+            }
+        }
+        void MemoryFU(RESe& R)
+        {
+            Instruction& I = R.I;
+            switch(I.op)
+            {
+                case 8:
+                {
+                    I.ALUOutput = I.RA + I.Imm;
+                    I.LMD = DCache[I.ALUOutput];
+                    break; 
+                }
+                case 9: I.ALUOutput = I.RA + I.Imm; break;                    
+            }
+            //cout << I.ALUOutput << endl;
+            R.executed = 1;
+        }
+        
+
+}M;
+
+class Branch : public FunctionalUnit
+{
+    public:
+        void process()
+        {
+            for(int i = 0; i < 2; i++) {
+                RESe& R = resStation[i];
+                if(!R.busy) continue;
+                Instruction& I = R.I;
+                if(R.busy && I.validA && I.validB)
+                {
+                    R.ready = 1;
+                    BranchFU(R);
+                    for(vector<ROBe>::iterator itt = ROB.begin(); itt != ROB.end(); itt++) {
+                        if(itt->IA == I.index) {
+                            itt->issued = 1;
+                        }
+                    }
+                }
+            }
+        }
+        void BranchFU(RESe& R)
+        {
+            Instruction& I = R.I;
+            switch(I.op) 
+            {
+                case 11: if(I.RA == 0) I.Cond = 1;
+                            else I.Cond = 0;
+                case 10: I.ALUOutput = I.NPC + (I.Imm << 1);
+            }
+            //cout << I.ALUOutput << endl;
+            R.executed = 1;
+        }
+}B;
+
+void RRFe::update(int result) {
+    data = result;
+    valid = 1;
+    A.validate(tag);
+    L.validate(tag);
+    M.validate(tag);
+    B.validate(tag);
+    for(vector<Instruction>::iterator it = DBuf.begin(); it != DBuf.end(); it++) {
+        Instruction& I = *it;
+        if(!I.validA)
+        {
+            if(I.RA == tag){
+                I.RA = RRF[I.RA].data;
+                I.validA = 1;
+            }
+        }
+        if(!I.validB)
+        {
+            if(I.RB == tag){
+                I.RB = RRF[I.RB].data;
+                I.validB = 1;
+            }
+        }
+    }
+    for(vector<Instruction>::iterator it = IBuf.begin(); it != IBuf.end(); it++) {
+        Instruction& I = *it;
+        if(!I.validA)
+        {
+            if(I.RA == tag){
+                I.RA = RRF[I.RA].data;
+                I.validA = 1;
+            }
+        }
+        if(!I.validB)
+        {
+            if(I.RB == tag){
+                I.RB = RRF[I.RB].data;
+                I.validB = 1;
+            }
+        }
+    }
+}
+
+void read_input(int arr[], int size, string filename)
+{ // Read Input
+    ifstream input;
+    input.open(filename);
+    string ins;
+    for (int i = 0; i < size; i++)
+    {
+        if (!input)
+            break;
+        getline(input, ins);
+        arr[i] = stoi(ins, 0, 16);
+    }
+    input.close();
+}
+
+void print_output(int arr[], int size, string filename)
+{ // Print Output
+    ofstream output;
+    output.open(filename);
+    for (int i = 0; i < size; i++)
+    {
+        int temp = arr[i];
+        temp = temp & 0xff;
+        output << hex << (temp >> 4);
+        temp = temp & 0xf;
+        output << hex << temp << endl;
+    }
+    output.close();
+}
+
+void print_stats(string filename)
+{ // Print Stats
+    ofstream output;
+    output.open(filename);
+    output << "Total number of instructions executed:" << num_inst  << endl;
+    output << "Number of instructions in each class" << endl;
+    output << "Arithmetic instructions              :" << num_arith << endl;
+    output << "Logical instructions                 :" << num_log << endl;
+    output << "Data instructions                    :" << num_data << endl;
+    output << "Control instructions                 :" << num_con << endl;
+    output << "Halt instructions                    :" << num_halt << endl;
+    output << "Cycles Per Instruction               :" << (double)num_cycles / num_inst << endl;
+    output << "Total number of stalls               :" << num_stall << endl;
+    output << "Data stalls (RAW)                    :" << num_dat_st << endl;
+    output << "Control stalls                       :" << num_con_st << endl;
+    output.close();
+}
+
+void stats(int op)
+{
+    num_inst++;
+    if(op < 4) num_arith++;
+    else if(op < 8) num_log++;
+    else if(op < 10) num_data++;
+    else if(op < 12) num_con++;
+    else num_halt++;
+}
+
+void initialize()
+{
+    for(int i = 0; i < 16; i++)
+    {
+        ARF[i].index = i;
+        ARF[i].data = RF[i];
+    }
+    for(int i = 0; i < 32; i++)
+        RRF[i].tag = i;
+}
+
+void Complete()
+{
+    for(vector<ROBe>::iterator it = ROB.begin(); it != ROB.end();) {
+        ROBe& Re = *it;
+        Instruction& I = Re.I;
+        if(Re.finished) {
+            switch(I.op) {
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+                case 4:
+                case 5:
+                case 6:
+                case 7:
+                case 8:
+                {
+                    RRF[I.destTag].regupd();
+                    break;
+                }
+                case 9:
+                {
+                    DCache[I.ALUOutput] = I.RB;
+                    break;
+                }
+                case 10:
+                {
+                    PC = I.ALUOutput;
+                    can_fetch = 1;
+                }
+                case 11:
+                {
+                    if(I.Cond) PC = I.ALUOutput;
+                    else PC = I.NPC;
+                    can_fetch = 1;
+                }
+                case 15:
+                {
+                    break;
+                }
+            }
+            stats(I.op);
+            ROB.erase(it);
+        }
+        else {
+            break;
+        }
+    }
+}
+
+void Finish()
+{
+    A.finish();
+    L.finish();
+    M.finish();
+    B.finish();
+}
+
+void Execute()
+{
+    A.process();
+    L.process();
+    M.process();
+    B.process();
+}
+
+void Dispatch()
+{
+    for(vector<Instruction>::iterator it = DBuf.begin(); it != DBuf.end();) {
+        Instruction I = *it;
+        int dispatched = 0;
+        switch(I.op) {
+            case 0:
+            case 1:
+            case 2:
+            case 3:
+            {
+                for(vector<RESe>::iterator itt = A.resStation.begin(); itt != A.resStation.end(); itt++) {
+                    if(itt->busy == 0) {
+                        itt->I = I;
+                        itt->busy = 1;
+                        itt->ready = 0;
+                        dispatched = 1;
+                        break;
+                    }
+                }
+                if(dispatched) DBuf.erase(it);
+                break;
+            }
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            {
+                for(vector<RESe>::iterator itt = L.resStation.begin(); itt != L.resStation.end(); itt++) {
+                    if(itt->busy == 0) {
+                        itt->I = I;
+                        itt->busy = 1;
+                        itt->ready = 0;
+                        dispatched = 1;
+                        break;
+                    }
+                }
+                if(dispatched) DBuf.erase(it);
+                break;
+            }
+            case 8:
+            case 9:
+            {
+                for(vector<RESe>::iterator itt = M.resStation.begin(); itt != M.resStation.end(); itt++) {
+                    if(itt->busy == 0) {
+                        itt->I = I;
+                        itt->busy = 1;
+                        itt->ready = 0;
+                        dispatched = 1;
+                        break;
+                    }
+                }
+                if(dispatched) DBuf.erase(it);
+                break;
+            }
+            case 10:
+            case 11:
+            {
+                for(vector<RESe>::iterator itt = B.resStation.begin(); itt != B.resStation.end(); itt++) {
+                    if(itt->busy == 0) {
+                        itt->I = I;
+                        itt->busy = 1;
+                        itt->ready = 0;
+                        dispatched = 1;
+                        break;
+                    }
+                }
+                if(dispatched) DBuf.erase(it);
+                break;
+            }
+            case 15:
+            {
+                dispatched = 1;
+                while(it != DBuf.end()) {DBuf.erase(it);}
+                break;
+            }
+        }
+        //cout << dispatched << endl;
+        if(dispatched) {
+            ROBe RRR;
+            RRR.I = I;
+            RRR.busy = 1;
+            RRR.IA = I.index;
+            if(I.op == 15) RRR.finished = 1;
+            ROB.push_back(RRR);
+        }
+        else {
+            break;
+            it++;
+        }
+    }
+}
+
+void Decode()
+{
+    for(vector<Instruction>::iterator it = IBuf.begin(); it != IBuf.end();)
+    {
+        Instruction I = *it;
+        if(DBuf.size() > maxfetch) {it++;continue;}
+        I.decode();
+        if(I.decoded) {
+            DBuf.push_back(I);
+            IBuf.erase(it);
+        }
+        else {
+            break;
+        }
+        if(I.op > 9) {
+            while(it != IBuf.end()) {IBuf.erase(it);}
+        }
+    }
+}
+
+void Fetch()
+{
+    if(!halt && can_fetch) {
+        if(IBuf.size() == maxfetch) {
+            num_dat_st++;
+            num_stall++;
+        }
+        while(IBuf.size() < maxfetch) {
+            Instruction I;
+            I.fetch();
+            IBuf.push_back(I);
+        }
+    }
+    else if(!can_fetch) {
+        num_con_st++;
+        num_stall++;
+    }
+}
+
+int32_t main()
+{ // Main
+    read_input(ICache, 256, "./input/ICache.txt");  // Read ICache
+    read_input(DCache, 256, "./input/DCache.txt");  // Read DCache
+    read_input(RF, 16, "./input/RF.txt");       // Read RF
+
+    initialize();
+
+    do
+    {
+        num_cycles++;
+        // Completion
+        Complete();
+
+        // Finishing
+        Finish();
+
+        // Issuing && Execution
+        Execute();
+        
+        // Dispatch
+        Dispatch();
+
+        // Decode
+        Decode();
+
+        // Fetch
+        Fetch();
+
+    }while((!IBuf.empty() || !DBuf.empty() || !ROB.empty() || !halt));
+
+    for(int i = 0; i < 16; i++) RF[i] = ARF[i].data;
+
+    print_output(DCache, 256, "./output/ODCache.txt");  // Print DCache
+    print_output(RF, 16, "./output/ORF.txt");  // Print RF
+    print_stats("./output/Output.txt");                 // Print Stats
+    
     return 0;
 }
